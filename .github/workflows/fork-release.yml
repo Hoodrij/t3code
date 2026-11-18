@@ -127,7 +127,17 @@ jobs:
             --platform win --target nsis --arch x64 \
             --build-version "${{ steps.version.outputs.version }}" \
             --skip-build \
+            --keep-stage \
             --verbose
+
+      - name: List packaged payload
+        if: failure() && steps.changed.outputs.build == 'true'
+        shell: bash
+        run: |
+          for dir in "$(cygpath -u "$LOCALAPPDATA")"/Temp/t3code-desktop-win-stage-*/app/dist/win-unpacked; do
+            echo "== $dir"
+            (cd "$dir" && find . -type f | sort)
+          done
 
       - name: Publish prerelease
         if: steps.changed.outputs.build == 'true'

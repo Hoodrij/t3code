@@ -18,6 +18,7 @@ import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { hasValidClaudeManifestAdapters } from "./ClaudeModelManifest.ts";
+import { withForkCapabilities } from "./forkModelOverrides.ts";
 import bundledManifestJson from "./model-manifest.json" with { type: "json" };
 import {
   ProviderCompatibilityPolicy,
@@ -156,7 +157,7 @@ export function resolveProviderCatalog(
       ...(entry.aliases ? { aliases: entry.aliases } : {}),
       ...(showNewBadge ? { badge: "new" as const } : {}),
       status: entry.status,
-      capabilities: profile?.capabilities ?? null,
+      capabilities: withForkCapabilities(driverKind, entry.profile, profile?.capabilities ?? null),
       adapter: entry.adapter,
       profileAdapter: profile?.adapter,
     });

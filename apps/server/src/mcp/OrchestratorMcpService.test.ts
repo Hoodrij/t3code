@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  ChatAttachmentId,
   CommandId,
   ContextTransferId,
   EnvironmentId,
@@ -30,6 +31,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import { formatThreadLink, hostedThreadLink } from "@t3tools/shared/threadLinks";
 import * as DateTime from "effect/DateTime";
@@ -55,6 +57,7 @@ import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1Thre
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import type { DelegatedTaskImages } from "./delegatedTaskImages.ts";
 import {
   DispatchModeLimit,
   type DispatchModeRefusal,
@@ -3508,6 +3511,128 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(retryCommand.modelSelection.instanceId, codexInstanceId);
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
+  );
+
+  it.effect("stages images for the child thread and releases them when dispatch is refused", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const stagedFor = yield* Ref.make<ReadonlyArray<string>>([]);
+      const released = yield* Ref.make(0);
+      const attachment = {
+        type: "image" as const,
+        id: ChatAttachmentId.make("child-00000000-0000-4000-8000-000000000000-png"),
+        name: "screen.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      const images: DelegatedTaskImages = (threadId) =>
+        Ref.update(stagedFor, (ids) => [...ids, threadId]).pipe(
+          Effect.as({
+            attachments: [attachment],
+            release: Ref.update(released, (count) => count + 1),
+          }),
+        );
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        runId: parentRunId,
+        parentNodeId,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        providerThreadId: null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Describe the screenshot.",
+        title: null,
+        model: "gpt-5.4",
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+      };
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          getThreadRecords: (threadId) =>
+            Ref.get(dispatched).pipe(
+              Effect.map((commands) =>
+                threadId === parentThreadId
+                  ? parentProjection(commands.length > 0 ? [task] : [])
+                  : childProjection,
+              ),
+            ),
+          isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+          assertProviderInstanceEnabled: () => Effect.void,
+          dispatch: (command) =>
+            Ref.updateAndGet(dispatched, (commands) => [...commands, command]).pipe(
+              Effect.flatMap((commands) =>
+                commands.length === 1
+                  ? Effect.succeed({
+                      sequence: 1,
+                      storedEvents: [
+                        {
+                          sequence: 1,
+                          commandId: null,
+                          event: { type: "subagent.updated", payload: task },
+                        },
+                      ],
+                    } as never)
+                  : Effect.fail(
+                      new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
+                        projectId,
+                        instanceId: codexInstanceId,
+                      }),
+                    ),
+              ),
+            ),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const input = {
+          task: "Describe the screenshot.",
+          images: ["/tmp/screen.png"],
+          mode: "async" as const,
+        };
+        yield* service.delegateTask(
+          scope,
+          { ...input, clientRequestId: "delegate-images-1" },
+          images,
+        );
+        yield* service
+          .delegateTask(scope, { ...input, clientRequestId: "delegate-images-2" }, images)
+          .pipe(Effect.flip);
+
+        const commands = (yield* Ref.get(dispatched)) as ReadonlyArray<{
+          readonly commandId: CommandId;
+          readonly attachments?: ReadonlyArray<unknown>;
+        }>;
+        assert.deepStrictEqual(commands[0]?.attachments, [attachment]);
+        assert.deepStrictEqual(
+          yield* Ref.get(stagedFor),
+          commands.map(({ commandId }) => IdAllocator.derive.delegatedTaskThread({ commandId })),
+        );
+        assert.equal(yield* Ref.get(released), 1);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
   );
 
   it.effect.each([

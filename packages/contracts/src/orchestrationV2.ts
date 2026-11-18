@@ -3561,6 +3561,7 @@ export const OrchestrationV2Command = Schema.Union([
     parentRunId: RunId,
     parentNodeId: NodeId,
     task: TrimmedNonEmptyString,
+    attachments: Schema.optional(Schema.Array(ChatAttachment)),
     title: Schema.optional(TrimmedNonEmptyString),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,

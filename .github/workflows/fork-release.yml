@@ -162,7 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=(release/*.exe release/*.blockmap release/*.yml)
+          files=(release/*.exe release/*.blockmap release/nightly*.yml release/latest*.yml)
           if (( ${#files[@]} == 0 )); then
             echo "::error::No installer in release/." && ls -la release || true
             exit 1

@@ -1,7 +1,7 @@
 name: Fork nightly (Windows)
 
 # Fork only. Rebases this fork's patches onto the latest upstream main inside the
-# runner, builds an unsigned Windows installer, and publishes it as a prerelease
+# runner, cross-builds an unsigned Windows installer on Linux as upstream does, and publishes it as a prerelease
 # here. The installed app updates from these releases, because the build takes
 # its update feed from GITHUB_REPOSITORY. The rebase is never pushed: GITHUB_TOKEN
 # cannot push upstream's workflow changes. A conflict opens an issue instead.
@@ -31,7 +31,9 @@ env:
 jobs:
   build:
     if: github.repository != 'pingdotgg/t3code'
-    runs-on: windows-2025
+    # Upstream cross-builds Windows on Linux; a native Windows build packs extra
+    # files and fails the payload file limit.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       GH_TOKEN: ${{ github.token }}
@@ -97,6 +99,16 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
+      - name: Install cargo-xwin
+        if: steps.changed.outputs.build == 'true'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-xwin@0.23.1
+
+      - name: Build resource monitor
+        if: steps.changed.outputs.build == 'true'
+        run: cargo xwin build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-pc-windows-msvc
+
       # Above upstream's run numbers, so a fork build installs over the same day's official nightly.
       - name: Resolve version
         id: version
@@ -114,6 +126,7 @@ jobs:
         shell: bash
         env:
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: true
         run: |
           set -euo pipefail
           # Production T3 Connect public config, as upstream's preview builds use.
@@ -134,7 +147,7 @@ jobs:
         if: failure() && steps.changed.outputs.build == 'true'
         shell: bash
         run: |
-          for dir in "$(cygpath -u "$LOCALAPPDATA")"/Temp/t3code-desktop-win-stage-*/app/dist/win-unpacked; do
+          for dir in "${TMPDIR:-/tmp}"/t3code-desktop-win-stage-*/app/dist/win-unpacked; do
             echo "== $dir"
             (cd "$dir" && find . -type f | sort)
           done

@@ -116,10 +116,17 @@ jobs:
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Production T3 Connect public config, as upstream's preview builds use.
+          for name in CLERK_PUBLISHABLE_KEY CLERK_JWT_TEMPLATE CLERK_CLI_OAUTH_CLIENT_ID RELAY_URL; do
+            export "T3CODE_$name=$(sed -n "s|^T3CODE_$name=||p" .env.example)"
+          done
           node scripts/update-release-package-versions.ts "${{ steps.version.outputs.version }}"
+          # Same split as upstream's release: bundle first, then package it.
+          vp run build:desktop:bundle
           vp run dist:desktop:artifact \
             --platform win --target nsis --arch x64 \
             --build-version "${{ steps.version.outputs.version }}" \
+            --skip-build \
             --verbose
 
       - name: Publish prerelease

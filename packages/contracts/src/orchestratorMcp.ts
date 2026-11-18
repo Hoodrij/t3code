@@ -170,6 +170,14 @@ export type OrchestratorMcpTerminalDelegatedTaskStatus =
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt,
+  images: Schema.optional(
+    Schema.Array(TrimmedNonEmptyString)
+      .check(Schema.isMinLength(1), Schema.isMaxLength(8))
+      .annotate({
+        description:
+          "Absolute paths of PNG, JPEG, GIF or WebP files on this machine. The child gets them with `task`. Local tasks only.",
+      }),
+  ),
   // Some providers send the whole target object as JSON text.
   target: Schema.optional(
     Schema.Union([OrchestratorMcpTarget, Schema.fromJsonString(OrchestratorMcpTarget)]),

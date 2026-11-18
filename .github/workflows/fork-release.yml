@@ -1,0 +1,165 @@
+name: Fork nightly (Windows)
+
+# Fork only. Rebases this fork's patches onto the latest upstream main inside the
+# runner, builds an unsigned Windows installer, and publishes it as a prerelease
+# here. The installed app updates from these releases, because the build takes
+# its update feed from GITHUB_REPOSITORY. The rebase is never pushed: GITHUB_TOKEN
+# cannot push upstream's workflow changes. A conflict opens an issue instead.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if neither upstream nor the fork changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+env:
+  FORK_BRANCH: fork/main
+  UPSTREAM_URL: https://github.com/pingdotgg/t3code.git
+
+jobs:
+  build:
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout fork branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Rebase onto upstream main
+        id: rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          fork_sha="$(git rev-parse HEAD)"
+          git fetch --no-tags "$UPSTREAM_URL" main
+          upstream_sha="$(git rev-parse FETCH_HEAD)"
+          echo "fork_sha=$fork_sha" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          if ! git rebase FETCH_HEAD; then
+            git rebase --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Skip when nothing changed
+        id: changed
+        shell: bash
+        env:
+          FORCE: ${{ inputs.force }}
+          MARKER: "upstream ${{ steps.rebase.outputs.upstream_sha }} + fork ${{ steps.rebase.outputs.fork_sha }}"
+        run: |
+          set -euo pipefail
+          latest="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          body=""
+          if [[ -n "$latest" ]]; then
+            body="$(gh release view "$latest" --json body --jq .body)"
+          fi
+          if [[ "$FORCE" != "true" && "$body" == *"$MARKER"* ]]; then
+            echo "Release $latest already has $MARKER."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup dependencies
+        if: steps.changed.outputs.build == 'true'
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        if: steps.changed.outputs.build == 'true'
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      # Above upstream's run numbers, so a fork build installs over the same day's official nightly.
+      - name: Resolve version
+        id: version
+        if: steps.changed.outputs.build == 'true'
+        shell: bash
+        run: |
+          node scripts/resolve-nightly-release.ts \
+            --date "$(date -u +%Y%m%d)" \
+            --run-number "$((100000 + GITHUB_RUN_NUMBER))" \
+            --sha "${{ steps.rebase.outputs.upstream_sha }}" \
+            --github-output
+
+      - name: Build installer
+        if: steps.changed.outputs.build == 'true'
+        shell: bash
+        env:
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          node scripts/update-release-package-versions.ts "${{ steps.version.outputs.version }}"
+          vp run dist:desktop:artifact \
+            --platform win --target nsis --arch x64 \
+            --build-version "${{ steps.version.outputs.version }}" \
+            --verbose
+
+      - name: Publish prerelease
+        if: steps.changed.outputs.build == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          FORK_SHA: ${{ steps.rebase.outputs.fork_sha }}
+          UPSTREAM_SHA: ${{ steps.rebase.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release/*.exe release/*.blockmap release/*.yml)
+          if (( ${#files[@]} == 0 )); then
+            echo "::error::No installer in release/." && ls -la release || true
+            exit 1
+          fi
+          notes="Built from upstream ${UPSTREAM_SHA} + fork ${FORK_SHA}.
+
+          Fork patches:
+          $(git log --format='- %s' "${UPSTREAM_SHA}..HEAD")"
+          gh release create "$TAG" "${files[@]}" \
+            --title "T3 Code Fork ${{ steps.version.outputs.version }}" \
+            --notes "$notes" \
+            --target "$FORK_SHA" \
+            --prerelease
+
+      - name: Report rebase conflict
+        if: failure() && steps.rebase.outputs.conflict == 'true'
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ steps.rebase.outputs.upstream_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Fork patches conflict with upstream"
+          existing="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // ""')"
+          body="Rebasing ${FORK_BRANCH} onto upstream ${UPSTREAM_SHA} failed. Rebase it locally and push. Run: ${RUN_URL}"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

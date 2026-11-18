@@ -96,6 +96,41 @@ describe("resolveProviderCatalog", () => {
     );
   });
 
+  it("adds Fast Mode to Claude Fable profiles that lack it", () => {
+    const effort = {
+      id: "effort",
+      label: "Reasoning",
+      type: "select",
+      options: [{ id: "medium", label: "Medium", isDefault: true }],
+    } as const;
+    const fastMode = { id: "fastMode", label: "Fast Mode", type: "boolean" } as const;
+    const catalog = ModelManifest.resolveProviderCatalog(
+      {
+        version: 1,
+        currentModels: {},
+        providers: {
+          claudeAgent: {
+            profiles: {
+              "fable-5": { capabilities: { optionDescriptors: [effort] } },
+              "fable-6": { capabilities: { optionDescriptors: [effort, fastMode] } },
+              "sonnet-5": { capabilities: { optionDescriptors: [effort] } },
+            },
+            models: [
+              { slug: "claude-fable-5-2", name: "Fable", status: "current", profile: "fable-5" },
+              { slug: "claude-fable-6", name: "Fable 6", status: "current", profile: "fable-6" },
+              { slug: "claude-sonnet-5", name: "Sonnet", status: "current", profile: "sonnet-5" },
+            ],
+          },
+        },
+      },
+      ProviderDriverKind.make("claudeAgent"),
+    );
+    assert.deepStrictEqual(
+      catalog?.models.map((model) => model.capabilities?.optionDescriptors?.map(({ id }) => id)),
+      [["effort", "fastMode"], ["effort", "fastMode"], ["effort"]],
+    );
+  });
+
   it("rejects invalid catalog references", () => {
     const invalidCatalog = (input: {
       readonly models: NonNullable<ModelManifest.ModelManifestData["providers"]>[string]["models"];
